@@ -2,6 +2,7 @@ library(shiny)
 library(shinyWidgets)
 library(tidyverse)
 library(rhandsontable)
+library(DT)
 
 source("loan-evaluation-funs.R")
 
@@ -177,7 +178,10 @@ ui <- fluidPage(
         tabPanel("Amortization", dataTableOutput("amort_table")),
         
         # Investment interest table
-        tabPanel("Investment Interest", dataTableOutput("investment_table"))
+        tabPanel("Investment Interest", dataTableOutput("investment_table")),
+        
+        # Summary table
+        tabPanel("Scenario Summary Table", DTOutput("summary_table"))
       )
     )
   )
@@ -188,7 +192,10 @@ server <- function(input, output, session) {
   # Store tables for calculations ----------------------------------------------
   
   rvals <- reactiveValues(
-    input_tbl = NULL
+    input_tbl = NULL,
+    summary_tbl = NULL,
+    best_scenario = NULL,
+    plot_height = NULL
   )
   
   # Store table of inputs
@@ -209,37 +216,7 @@ server <- function(input, output, session) {
           investment_interest_rate = input$investment_apr,
           investment_coupon = input$coupon,
           scenario_start_date = input$start_date
-        ) |>
-          mutate(
-            loan_pmt = pmap_dbl(
-              list(
-                loan_amount,
-                loan_interest_rate,
-                loan_term,
-                str_to_lower(payment_freq)
-              ),
-              calc_loan_pmt
-            ),
-            loan_periods = pmap_dbl(
-              list(
-                loan_amount,
-                loan_pmt + extra_payment,
-                loan_interest_rate,
-                str_to_lower(payment_freq)
-              ),
-              calc_loan_term
-            ),
-            scenario_end_date = pmap_dbl(
-              list(
-                scenario_start_date,
-                loan_periods,
-                str_to_lower(payment_freq)
-              ),
-              get_period_date
-            ) |>
-              as_date()
-          ) |>
-          unnest(scenario_end_date)
+        )
       )
     }
   )
@@ -255,10 +232,18 @@ server <- function(input, output, session) {
       rvals$input_tbl |>
         select(-viz_include) |>
         mutate(
-          loan_pmt = loan_pmt + extra_payment,
-          loan_periods = pmap_dbl(
+          loan_pmt = pmap_dbl(
             list(
               loan_amount,
+              loan_interest_rate,
+              loan_term,
+              str_to_lower(payment_freq)
+            ),
+            calc_loan_pmt
+          ),
+          loan_periods = pmap_dbl(
+            list(
+              loan_amount + extra_payment,
               loan_pmt,
               loan_interest_rate,
               str_to_lower(payment_freq)
@@ -286,7 +271,15 @@ server <- function(input, output, session) {
       rvals$input_tbl |>
         select(-viz_include) |>
         mutate(
-          loan_pmt = loan_pmt + extra_payment,
+          loan_pmt = pmap_dbl(
+            list(
+              loan_amount,
+              loan_interest_rate,
+              loan_term,
+              str_to_lower(payment_freq)
+            ),
+            calc_loan_pmt
+          ),
           loan_periods = pmap_dbl(
             list(
               loan_amount,
@@ -312,21 +305,37 @@ server <- function(input, output, session) {
     }
   })
   
+  # Summary data
+  rvals$summary_tbl <- reactive({
+    left_join(
+      amort_data() |>
+        group_by(scenario) |>
+        summarise(
+          scenario_start_date = min(pmt_date, na.rm = TRUE),
+          scenario_end_date = max(pmt_date, na.rm = TRUE),
+          text_date = min(pmt_date[prin_paid > int_paid], na.rm = TRUE),
+          num_periods = n(),
+          loan_pmt = mean(loan_pmt + extra_payment, na.rm = TRUE),
+          total_int_paid = sum(int_paid, na.rm = TRUE),
+          total_prin_paid = sum(prin_paid, na.rm = TRUE),
+          npv_int_paid = sum(int_npv, na.rm = TRUE),
+          npv_prin_paid = sum(prin_npv, na.rm = TRUE),
+          .groups = "drop"
+        ),
+      investment_data() |>
+        group_by(scenario) |>
+        summarise(
+          investment_int_npv = sum(investment_int_npv, na.rm = TRUE),
+          int_earned = sum(int_earned, na.rm = TRUE),
+          investment_principal = mean(investment_principal, na.rm = TRUE)
+        ),
+      join_by(scenario)
+    ) |>
+      mutate(
+        cash_npv = investment_principal + investment_int_npv - npv_int_paid
+      )
+  })
   
-  # Create dataframes for plotting ---------------------------------------------
-  
-  # Amortization data
-  # area_plot_data <- reactive({
-  #   amort_data() |>
-  #     pivot_longer(
-  #       c(int_paid, prin_paid),
-  #       names_to = "metric",
-  #       values_to = "amount"
-  #     ) |>
-  #     select(scenario, pmt_date, metric, amount)
-  # })
-  
-  # Appreciation data
   
   # Create display objects -----------------------------------------------------
   
@@ -336,10 +345,29 @@ server <- function(input, output, session) {
       pull(scenario)
   })
   
+  # Select best scenario
+  rvals$best_scenario <- reactive({
+    if (!is.null(rvals$summary_tbl)) {
+      rvals$summary_tbl() |>
+        filter(scenario %in% scenarios_to_view()) |>
+        slice_max(cash_npv, with_ties = FALSE) |>
+        pull(scenario)
+    }
+  })
+  
+  # Set the plot height
+  rvals$plot_height <- reactive({
+    500 * length(scenarios_to_view())
+  })
+  
   # Scenario table
   output$scenario_table <- renderRHandsontable({
     if (!is.null(rvals$input_tbl)) {
-      rhandsontable(rvals$input_tbl, overflow = "visible") |>
+      rhandsontable(
+        rvals$input_tbl,
+        overflow = "visible"
+        # row_highlights = rvals$best_scenario
+      ) |>
         hot_col("loan_interest_rate", format = "0.00%") |>
         hot_col("investment_interest_rate", format = "0.00%") |>
         hot_col("loan_amount", format = "$0,0.00") |>
@@ -355,31 +383,17 @@ server <- function(input, output, session) {
     }
   })
   
-  # Amortization plot
-  # output$amort_plot <- renderPlot({
-  #   ggplot() +
-  #     geom_area(
-  #       data = area_plot_data() |> filter(scenario %in% scenarios_to_view()),
-  #       aes(
-  #         x = pmt_date,
-  #         y = amount,
-  #         group = metric,
-  #         fill = metric,
-  #         color = metric
-  #       ),
-  #       alpha = 0.5, position = "identity"
-  #     ) +
-  #     geom_line(
-  #       data = investment_data() |> filter(scenario %in% scenarios_to_view()),
-  #       aes(x = pmt_date, y = int_earned),
-  #       color = "blue"
-  #     ) +
-  #     facet_wrap(~ scenario)
-  # })
-  
-  output$amort_plot <- renderPlot({
-    gen_amort_plot(amort_data(), investment_data())
-  })
+  # Amortization plots
+  output$amort_plot <- renderPlot(
+    {
+      gen_amort_plot(
+        amort_data() |> filter(scenario %in% scenarios_to_view()),
+        investment_data() |> filter(scenario %in% scenarios_to_view()),
+        rvals$summary_tbl() |> filter(scenario %in% scenarios_to_view())
+      )
+    },
+    height = isolate(rvals$plot_height)
+  )
   
   # Amortization table
   output$amort_table <- renderDataTable({
@@ -395,6 +409,26 @@ server <- function(input, output, session) {
       filter(scenario %in% scenarios_to_view()) |>
       select(scenario, principal = "P", int_earned, pmt_date) |>
       mutate(pmt_date = as.character(pmt_date))
+  })
+  
+  # Summary table
+  output$summary_table <- renderDT({
+    rvals$summary_tbl() |>
+      select(-text_date) |>
+      filter(scenario %in% scenarios_to_view()) |>
+      datatable(rownames = FALSE) |>
+      formatStyle(
+        "scenario",
+        target = "row",
+        backgroundColor = styleEqual(rvals$best_scenario(), "lightgreen")
+      ) |>
+      formatCurrency(
+        c(
+          "loan_pmt", "total_int_paid", "total_prin_paid", "npv_int_paid",
+          "npv_prin_paid", "investment_int_npv", "int_earned",
+          "investment_principal", "cash_npv"
+        )
+      )
   })
 }
 

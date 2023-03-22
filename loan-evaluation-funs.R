@@ -28,6 +28,11 @@ calc_loan_pmt <- function(P, r, yrs, pmt_freq) {
   P * r * ((r + 1) ^ (n)) / (((r + 1) ^ n) - 1)
 }
 
+calc_npv <- function(P, r, num_periods) {
+  r <- r / get_payments_per_year(pmt_freq)
+  
+}
+
 calc_loan_term <- function(P, pmt, r, pmt_freq) {
   r <- r / get_payments_per_year(pmt_freq)
   ceiling(abs(log(1 - ((P * r) / pmt)) / log(1 + r)))
@@ -35,14 +40,15 @@ calc_loan_term <- function(P, pmt, r, pmt_freq) {
 
 gen_amort_tbl <- function(pmt, P, r, yrs, start_date, pmt_freq) {
   n <- calc_loan_term(P, pmt, r, pmt_freq)
-  # n <- yrs * get_payments_per_year(pmt_freq)
   r <- r / get_payments_per_year(pmt_freq)
   
   amort_tbl <- data.frame(
-    period_num = seq(0, n - 1),
+    period_num = seq(1, n),
     P = c(P, rep(NA, n - 1)),
     int_paid = rep(NA, n),
-    prin_paid = rep(NA, n)
+    prin_paid = rep(NA, n),
+    int_npv = rep(NA, n),
+    prin_npv = rep(NA, n)
   )
   
   for (i in seq(1, n - 1)) {
@@ -52,11 +58,19 @@ gen_amort_tbl <- function(pmt, P, r, yrs, start_date, pmt_freq) {
     
     amort_tbl[i, "int_paid"] <- int_paid
     amort_tbl[i, "prin_paid"] <- prin_paid
+    amort_tbl[i, "int_npv"] <- amort_tbl[i, "int_paid"] /
+      (1 + r) ** amort_tbl[i, "period_num"]
+    amort_tbl[i, "prin_npv"] <- amort_tbl[i, "prin_paid"] /
+      (1 + r) ** amort_tbl[i, "period_num"]
     amort_tbl[i + 1, "P"] <- rem_prin
   }
   
   amort_tbl[n, "int_paid"] <- amort_tbl[n, "P"] * r
   amort_tbl[n, "prin_paid"] <- amort_tbl[n, "P"]
+  amort_tbl[n, "int_npv"] <- amort_tbl[n, "int_paid"] /
+    (1 + r) ** amort_tbl[n, "period_num"]
+  amort_tbl[n, "prin_npv"] <- amort_tbl[n, "prin_paid"] /
+    (1 + r) ** amort_tbl[n, "period_num"]
   
   amort_tbl <- amort_tbl |>
     mutate(
@@ -67,7 +81,7 @@ gen_amort_tbl <- function(pmt, P, r, yrs, start_date, pmt_freq) {
         as_date()
     ) |>
     unnest(pmt_date) |>
-    filter(P >= 0)
+    filter(P >= 0.01)
   
   return(amort_tbl)
 }
@@ -79,11 +93,14 @@ gen_invest_tbl <- function(coupon, P, r, num_periods, start_date, pmt_freq) {
   invstmt_tbl <- data.frame(
     period_num = seq(1, num_periods),
     P = c(P, rep(NA, num_periods - 1)),
-    int_earned = rep(NA, num_periods)
+    int_earned = rep(NA, num_periods),
+    investment_int_npv = rep(NA, num_periods)
   )
   
   for (i in seq(1, num_periods)) {
     invstmt_tbl[i, "int_earned"] <- (invstmt_tbl[i, "P"] * r) - coupon
+    invstmt_tbl[i, "investment_int_npv"] <- invstmt_tbl[i, "int_earned"] /
+      (1 + r) ** invstmt_tbl[i, "period_num"]
     invstmt_tbl[i + 1, "P"] <- invstmt_tbl[i, "P"] +
       invstmt_tbl[i, "int_earned"]
   }
@@ -101,14 +118,20 @@ gen_invest_tbl <- function(coupon, P, r, num_periods, start_date, pmt_freq) {
   return(invstmt_tbl)
 }
 
-gen_amort_plot <- function(amort_df, investment_df) {
+gen_amort_plot <- function(amort_df, investment_df, summary_df) {
   area_plot_data <- amort_df |>
     pivot_longer(
       c(int_paid, prin_paid),
       names_to = "metric",
       values_to = "amount"
     ) |>
-    select(scenario, pmt_date, metric, amount)
+    select(scenario, pmt_date, metric, amount) |>
+    mutate(
+      metric = str_replace(metric, "int", "interest") |>
+        str_replace("prin", "principal") |>
+        str_replace_all("_", " ") |>
+        str_to_title()
+    )
   
   label_loc_data <- amort_df |>
     group_by(scenario) |>
@@ -117,41 +140,8 @@ gen_amort_plot <- function(amort_df, investment_df) {
     ungroup() |>
     select(scenario, pmt_date)
   
-  finish_line_data <- amort_df |>
-    group_by(scenario) |>
-    summarise(
-      total_prin_paid = sum(prin_paid, na.rm = TRUE),
-      total_int_paid = sum(int_paid, na.rm = TRUE),
-      payoff_date = max(pmt_date),
-      .groups = "drop"
-    ) |>
-    select(scenario, payoff_date, total_prin_paid, total_int_paid)
-  
-  annotation_data <- investment_df |>
-    group_by(scenario) |>
-    slice_max(pmt_date) |>
-    ungroup() |>
-    left_join(finish_line_data, join_by(scenario)) |>
-    left_join(
-      select(label_loc_data, scenario, text_date = "pmt_date"),
-      join_by(scenario)
-    ) |>
-    mutate(
-      time_saved = interval(payoff_date, max(payoff_date)) |>
-        as.period(unit = "days") |>
-        slot("day") %>%
-        `/`(360),
-      net_cash_value = if_else(
-        time_saved > 0,
-        (P + int_earned) * ((1 + investment_interest_rate) ^ time_saved),
-        P + int_earned
-      ),
-      net_value = net_cash_value - total_int_paid,
-      across(
-        c(loan_pmt, net_cash_value, total_int_paid, net_value, loan_amount),
-        as.numeric
-      )
-    )
+  finish_line_data <- summary_df |>
+    select(scenario, scenario_end_date)
   
   text_height = max(area_plot_data$amount) * .85
   
@@ -174,33 +164,36 @@ gen_amort_plot <- function(amort_df, investment_df) {
     ) +
     geom_vline(
       data = finish_line_data,
-      aes(xintercept = payoff_date),
+      aes(xintercept = scenario_end_date),
       linetype = "solid"
     ) +
     geom_text(
-      data = annotation_data,
+      data = summary_df,
       aes(
         x = text_date,
         y = text_height,
         label = str_glue(
           "Monthly payment: {scales::label_dollar()(loan_pmt)}",
-          "Principal : {scales::label_dollar()(loan_amount)}",
-          "Payoff date: {scales::label_date()(payoff_date)}",
-          "Interest rate: {scales::label_percent()(loan_interest_rate)}",
-          "Total interest paid: {scales::label_dollar()(total_int_paid)}",
-          "Net cash value: {scales::label_dollar()(net_cash_value)}",
-          "Net value (ex-house): {scales::label_dollar()(net_value)}",
+          "Payoff date: {scales::label_date()(scenario_end_date)}",
+          "Total interest paid (PV): {scales::label_dollar()(npv_int_paid)}",
+          "Total interest earned: (PV) {scales::label_dollar()(investment_int_npv)}",
+          "Net value (ex-house): {scales::label_dollar()(cash_npv)}",
           .sep = "\n"
         )
       ),
-      size = 3
+      size = 5
     ) +
     scale_y_continuous(labels = scales::label_dollar()) +
     scale_x_date(date_breaks = "3 years", date_labels = "%b %Y") +
-    facet_wrap(~ scenario, ncol = 2) +
+    facet_wrap(~ scenario, ncol = 1, scales = "free") +
+    labs(x = NULL, y = NULL) +
     theme_bw() +
     theme(
-      legend.position = "bottom",
-      axis.text.x = element_text(angle = 45, vjust = 0.7)
+      legend.position = "top",
+      axis.text.x = element_text(angle = 45, vjust = 0.7),
+      strip.text = element_text(size = 18),
+      legend.text = element_text(size = 14),
+      axis.text = element_text(size = 14),
+      legend.title = element_blank()
     )
 }

@@ -191,14 +191,10 @@ server <- function(input, output, session) {
   
   # Store tables for calculations ----------------------------------------------
   
-  rvals <- reactiveValues(
-    input_tbl = NULL,
-    summary_tbl = NULL,
-    best_scenario = NULL,
-    plot_height = NULL
-  )
+  rvals <- reactiveValues()
   
-  # Store table of inputs
+  # Store row of inputs and add it to the scenario table when the user clicks on
+  # "Add Scenario" button
   observeEvent(
     input$add_scenario,
     {
@@ -221,6 +217,8 @@ server <- function(input, output, session) {
     }
   )
   
+  # Update the scenario table reactive object if the user makes changes to it in
+  # the UI
   observe({
     if (!is.null(input$scenario_table))
       rvals$input_tbl <- hot_to_r(input$scenario_table)
@@ -241,9 +239,10 @@ server <- function(input, output, session) {
             ),
             calc_loan_pmt
           ),
+          loan_pmt = loan_pmt + extra_payment,
           loan_periods = pmap_dbl(
             list(
-              loan_amount + extra_payment,
+              loan_amount,
               loan_pmt,
               loan_interest_rate,
               str_to_lower(payment_freq)
@@ -280,6 +279,7 @@ server <- function(input, output, session) {
             ),
             calc_loan_pmt
           ),
+          loan_pmt = loan_pmt + extra_payment,
           loan_periods = pmap_dbl(
             list(
               loan_amount,
@@ -315,7 +315,7 @@ server <- function(input, output, session) {
           scenario_end_date = max(pmt_date, na.rm = TRUE),
           text_date = min(pmt_date[prin_paid > int_paid], na.rm = TRUE),
           num_periods = n(),
-          loan_pmt = mean(loan_pmt + extra_payment, na.rm = TRUE),
+          loan_pmt = mean(loan_pmt, na.rm = TRUE),
           total_int_paid = sum(int_paid, na.rm = TRUE),
           total_prin_paid = sum(prin_paid, na.rm = TRUE),
           npv_int_paid = sum(int_npv, na.rm = TRUE),

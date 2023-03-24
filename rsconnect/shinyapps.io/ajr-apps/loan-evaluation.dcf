@@ -5,9 +5,9 @@ account: ajr-apps
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 8637968
-bundleId: 6990941
+bundleId: 6994878
 url: https://ajr-apps.shinyapps.io/loan-evaluation/
-when: 1679467154.01039
-lastSyncTime: 1679467154.0104
+when: 1679524834.5927
+lastSyncTime: 1679524834.59271
 asMultiple: FALSE
 asStatic: FALSE
